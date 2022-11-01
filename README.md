@@ -1,4 +1,4 @@
-<h3 align="center">How to Dockerize Nextcloud Online (Fast)</h3>
+<h1 align="center">How to Dockerize Nextcloud Online (Fast)</h3>
 
 
 This docker compose file should achieve one of the fastest Nextcloud instance!
