@@ -1,0 +1,120 @@
+---
+version: '3.7'
+
+services:
+  busyboy-chown-hack: #Temporary busybox container to set correct permissions to shared socket folders
+    image: busybox
+    container_name: busyboy-chown-hack
+    command: sh -c "chown -R 82:82 /nextcloud-postgres-socket/ /nextcloud-redis-socket/  && chmod -R 770 /nextcloud-postgres-socket/ /nextcloud-redis-socket/ "
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - nextcloud-postgres-socket:/nextcloud-postgres-socket
+      - nextcloud-redis-socket:/nextcloud-redis-socket
+
+  nextcloud-postgresql:
+    image: postgres:${POSTGRESQL_VER}-alpine # Define the version in .env
+    container_name: nextcloud-postgresql
+    command: postgres -c unix_socket_directories='/var/run/postgresql/,/nextcloud-postgres-socket/' # Add the /nextcloud-sockets/ socket folder to postgres
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - nextcloud-db:/var/lib/postgresql/data
+      - ./mounted_confs/db_init_psql15_workaround.sh:/docker-entrypoint-initdb.d/db_init_psql15_workaround.sh:ro # This workaround is only necessary for postgresql 15
+      - nextcloud-postgres-socket:/nextcloud-postgres-socket
+    environment:
+      - POSTGRES_DB=nextcloud_db # The PostgreSQL default database (automatically created at first launch)
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Add this environment variable to the .env file.} 
+      - POSTGRES_USER=${POSTGRES_USER:?Add this environment variable to the .env file.}
+    restart: always
+    user: "70:82" # Run as a member of the www-data GID 82 group but keep postgres uid as 70
+    depends_on:
+      - busyboy-chown-hack
+  
+  nextcloud-redis:
+    image: redis:alpine
+    container_name: nextcloud-redis
+    command: redis-server --unixsocket /nextcloud-redis-socket/redis.sock --unixsocketperm 770 --bind 127.0.0.1
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - nextcloud-redis:/data
+      - nextcloud-redis-socket:/nextcloud-redis-socket
+    restart: always
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes 
+    user: "999:82" # Run as a member of the www-data GID 82 group but keep redis uid as 999
+
+  nextcloud-fpm:
+    image: nextcloud:fpm-alpine
+    container_name: nextcloud-fpm
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - nextcloud-redis:/nextcloud-redis
+      - nextcloud-www:/var/www/html
+      - nextcloud-redis-socket:/nextcloud-redis-socket
+      - nextcloud-php-fpm-socket:/nextcloud-php-fpm-socket
+      - nextcloud-postgres-socket:/nextcloud-postgres-socket
+      - ./mounted_confs/zz-docker.conf:/usr/local/etc/php-fpm.d/zz-docker.conf:ro # Activate php-fpm socket for nginx
+    environment:
+      - REDIS_HOST=/nextcloud-redis-socket/redis.sock
+      - REDIS_HOST_PORT=0
+      - POSTGRES_HOST=/nextcloud-postgres-socket/
+      - POSTGRES_DB=nextcloud_db
+      - POSTGRES_USER=${POSTGRES_USER:?Add this environment variable to the .env file.}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Add this environment variable to the .env file.}
+      - NEXTCLOUD_TRUSTED_DOMAINS=${NEXTCLOUD_TRUSTED_DOMAINS} 
+      - PHP_MEMORY_LIMIT=1024M # (default 512M) This sets the maximum amount of memory in bytes that a script is allowed to allocate.
+      - PHP_UPLOAD_LIMIT=1024M # (default 512M) This sets the upload limit (post_max_size and upload_max_filesize) for big files.
+    depends_on:
+      - busyboy-chown-hack
+      - nextcloud-postgresql
+      - nextcloud-redis
+    links:
+      - nextcloud-postgresql
+    restart: always
+
+  nextcloud-cron:
+    image: nextcloud:fpm-alpine
+    container_name: nextcloud-cron
+    volumes_from:
+      - nextcloud-fpm
+    entrypoint: /cron.sh
+    depends_on:
+      - nextcloud-postgresql
+      - nextcloud-redis
+    restart: always
+
+  nextcloud-nginx:
+    image: nginx:alpine
+    container_name: nextcloud-nginx
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./mounted_confs/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nextcloud-php-fpm-socket:/nextcloud-php-fpm-socket
+      - nextcloud-www:/var/www/html
+    depends_on:
+      - nextcloud-fpm
+    links:
+      - nextcloud-fpm
+    restart: always
+    ports:
+      - 80:80
+
+volumes:
+  nextcloud-www:
+   name: nextcloud-www
+  nextcloud-nginx:
+   name: nextcloud-nginx
+  nextcloud-db:
+   name: nextcloud-db
+  nextcloud-redis:
+   name: nextcloud-redis
+  nextcloud-redis-socket:
+   name: nextcloud-redis-socket
+  nextcloud-postgres-socket:
+   name: nextcloud-postgres-socket
+  nextcloud-php-fpm-socket:
+   name: nextcloud-php-fpm-socket
